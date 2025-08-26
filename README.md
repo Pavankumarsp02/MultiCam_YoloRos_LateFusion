@@ -54,6 +54,14 @@ Verify that container is created
 ```shell
 sudo docker ps -a
 ```
+Start the container
+```shell
+sudo docker start -ai <container name>
+colcon build --packages-select yolo_ros
+source install/setup.sh
+ros2 launch yolo_bringup yolov8.launch.py
+```
+
 
 ## Models
 
