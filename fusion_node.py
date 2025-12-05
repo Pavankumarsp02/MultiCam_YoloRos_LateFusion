@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-yolo_fusion_node.py (updated: strict detection freshness + image black-on-disconnect)
+yolo_fusion_node.py (updated: 5 cameras, 2x3 image stitch)
 
 Behavior summary:
  - Detections (append-only): only accept detections that arrived *since the last publish*.
    If none arrived in the cycle, publish an empty yolo_msgs/DetectionArray with header.frame_id='fused'.
  - Images: keep last image as before unless the publisher for that camera is gone (publisher count == 0).
-   If publisher gone -> show black tile for that column.
+   If publisher gone -> show black tile for that position.
  - Preserves per-detection bbox3d.frame_id / keypoints3d.frame_id to record source camera.
- - Uses cv_bridge + OpenCV for image conversions (stitching is side-by-side).
+ - Uses cv_bridge + OpenCV for image conversions. Stitching forms a 2x3 grid (left->right, top->bottom)
+   and tile placement follows the order of img_input_topics.
 """
 
 from __future__ import annotations
@@ -34,13 +35,18 @@ except Exception:
     CvBridge = None
     CvBridgeError = Exception  # fallback
 
+# Defaults updated to 5 topics
 DEFAULT_DET_INPUTS = [
+    '/yolo/detections1',
+    '/yolo/detections2',
     '/yolo/detections3',
-    '/yolo/detections5',
     '/yolo/detections4',
+    '/yolo/detections5',
 ]
 DEFAULT_IMG_INPUTS = [
     '/yolo/dbg_image3',
+    '/yolo/dbg_image1',
+    '/yolo/dbg_image2',
     '/yolo/dbg_image5',
     '/yolo/dbg_image4',
 ]
@@ -48,6 +54,11 @@ DEFAULT_OUTPUT_DET = '/fused/detections'
 DEFAULT_OUTPUT_IMG = '/fused/dbg_image'
 DEFAULT_RATE = 10.0
 NEUTRAL_FUSED_FRAME_ID = 'fused'  # fused header.frame_id
+
+# Grid configuration for image stitching
+GRID_ROWS = 2
+GRID_COLS = 3
+GRID_CELLS = GRID_ROWS * GRID_COLS  # 6 cells for 2x3
 
 class YoloFusionNode(Node):
     def __init__(self,
@@ -58,7 +69,7 @@ class YoloFusionNode(Node):
                  publish_rate_hz: float):
         super().__init__('late_fusion_node')
 
-        self.get_logger().info('YOLO fusion node starting (freshness-safe).')
+        self.get_logger().info('YOLO fusion node starting (freshness-safe, 5 cams, 2x3 stitch).')
 
         self.det_input_topics = det_input_topics
         self.img_input_topics = img_input_topics
@@ -69,14 +80,12 @@ class YoloFusionNode(Node):
         qos = QoSProfile(depth=10)
 
         # Latest messages storage
-        # For detections we track a receive counter per-topic so we can decide "fresh since last publish"
         self.latest_det_msgs: dict[str, DetectionArray | None] = {t: None for t in self.det_input_topics}
         self.recv_seq: dict[str, int] = {t: 0 for t in self.det_input_topics}           # incremented on each msg recv
         self.last_published_seq: dict[str, int] = {t: 0 for t in self.det_input_topics}  # snapshot after publish
 
         # For images we keep latest message and will display last image unless publisher disappears
         self.latest_img_msgs: dict[str, RosImage | None] = {t: None for t in self.img_input_topics}
-        # don't track seq for images (we keep last image unless publisher count == 0)
 
         # CV bridge
         self.bridge = CvBridge() if CvBridge is not None else None
@@ -156,7 +165,6 @@ class YoloFusionNode(Node):
         # If no new messages across all detection topics -> publish empty fused message
         if not msgs_to_use:
             empty_msg = DetectionArray()
-            # stamp with current ROS time (fresh), and neutral fused frame_id
             now = self.get_clock().now().to_msg()
             empty_msg.header.stamp = deepcopy(now)
             empty_msg.header.frame_id = NEUTRAL_FUSED_FRAME_ID
@@ -166,13 +174,12 @@ class YoloFusionNode(Node):
                 self.get_logger().debug('Published EMPTY fused detections (no fresh inputs this cycle)')
             except Exception as e:
                 self.get_logger().error(f'Failed to publish empty fused detections: {e}')
-            # Important: advance last_published_seq to current recv_seq for all topics so old messages won't be reused
+            # Advance last_published_seq to current recv_seq for all topics so old messages won't be reused
             for t in self.det_input_topics:
                 self.last_published_seq[t] = self.recv_seq.get(t, 0)
             return
 
         # There are new messages; build fused message from only those new messages
-        # Use the newest stamp among the msgs_to_use as template/time
         try:
             newest = max((m for (_, m) in msgs_to_use), key=lambda m: (m.header.stamp.sec, m.header.stamp.nanosec))
         except Exception:
@@ -229,95 +236,99 @@ class YoloFusionNode(Node):
             self.last_published_seq[t] = self.recv_seq.get(t, 0)
 
     # -------------------------
-    # Images: keep last image unless publisher disappears -> black placeholder
+    # Images: 2x3 grid stitching, tile order = img_input_topics order
     # -------------------------
     def _publish_stitched_image(self) -> None:
         # If cv_bridge/OpenCV missing, do nothing
         if self.bridge is None or cv2 is None:
             return
 
-        # Build images list in order of img_input_topics
+        # Build images list mapped to GRID_CELLS positions: fill with None when no topic assigned or publisher disconnected
         imgs = []
         img_msgs = []
-        for topic in self.img_input_topics:
-            msg = self.latest_img_msgs.get(topic)
-            # check whether publisher exists for this topic; if not -> treat as disconnected -> force black
-            pubs = self.get_publishers_info_by_topic(topic)
-            publisher_count = len(pubs) if pubs is not None else 0
-            publisher_connected = (publisher_count > 0)
-            if msg is None:
-                # no image ever received yet
-                if publisher_connected:
-                    # publisher exists but not yet produced frame -> treat as missing this cycle: preserve None (will create black placeholder)
-                    imgs.append(None)
-                    img_msgs.append(None)
-                else:
-                    # no publisher -> black
-                    imgs.append(None)
-                    img_msgs.append(None)
-                continue
 
-            # If publisher exists -> we show last image (previous behavior)
-            # If publisher gone -> black (we check publisher_connected)
-            if not publisher_connected:
-                imgs.append(None)  # force black tile
-                img_msgs.append(None)
-                continue
-
-            # else publisher exists and msg present: convert to cv image
-            try:
-                cv_img = None
-                try:
-                    cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-                except CvBridgeError:
-                    try:
-                        cv_img_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-                        if cv_img_raw is None:
-                            cv_img = None
-                        else:
-                            if len(cv_img_raw.shape) == 2:
-                                cv_img = cv2.cvtColor(cv_img_raw, cv2.COLOR_GRAY2BGR)
-                            elif cv_img_raw.shape[2] == 3:
-                                cv_img = cv2.cvtColor(cv_img_raw, cv2.COLOR_RGB2BGR)
-                            else:
-                                cv_img = cv_img_raw
-                    except Exception as e:
-                        self.get_logger().warning(f'cv_bridge passthrough conversion failed for topic {topic}: {e}')
-                        cv_img = None
-
-                if cv_img is None:
-                    imgs.append(None)
-                    img_msgs.append(msg)
+        # For each grid cell index, map to input topic if available (order defines position)
+        for idx in range(GRID_CELLS):
+            if idx < len(self.img_input_topics):
+                topic = self.img_input_topics[idx]
+                msg = self.latest_img_msgs.get(topic)
+                # check whether publisher exists for this topic; if not -> treat as disconnected -> force black
+                pubs = self.get_publishers_info_by_topic(topic)
+                publisher_count = len(pubs) if pubs is not None else 0
+                publisher_connected = (publisher_count > 0)
+                if msg is None:
+                    # no image ever received yet
+                    if publisher_connected:
+                        imgs.append(None)
+                        img_msgs.append(None)
+                    else:
+                        imgs.append(None)
+                        img_msgs.append(None)
                     continue
 
-                imgs.append(cv_img)
-                img_msgs.append(msg)
-            except Exception as e:
-                self.get_logger().warning(f'Exception converting image from {topic}: {e}')
-                imgs.append(None)
-                img_msgs.append(msg)
+                if not publisher_connected:
+                    imgs.append(None)
+                    img_msgs.append(None)
+                    continue
 
-        # If no images at all available and no publishers -> publish a single black panorama
+                # convert to cv image
+                try:
+                    cv_img = None
+                    try:
+                        cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                    except CvBridgeError:
+                        try:
+                            cv_img_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+                            if cv_img_raw is None:
+                                cv_img = None
+                            else:
+                                if len(cv_img_raw.shape) == 2:
+                                    cv_img = cv2.cvtColor(cv_img_raw, cv2.COLOR_GRAY2BGR)
+                                elif cv_img_raw.shape[2] == 3:
+                                    cv_img = cv2.cvtColor(cv_img_raw, cv2.COLOR_RGB2BGR)
+                                else:
+                                    cv_img = cv_img_raw
+                        except Exception as e:
+                            self.get_logger().warning(f'cv_bridge passthrough conversion failed for topic {topic}: {e}')
+                            cv_img = None
+
+                    if cv_img is None:
+                        imgs.append(None)
+                        img_msgs.append(msg)
+                        continue
+
+                    imgs.append(cv_img)
+                    img_msgs.append(msg)
+                except Exception as e:
+                    self.get_logger().warning(f'Exception converting image from {topic}: {e}')
+                    imgs.append(None)
+                    img_msgs.append(msg)
+            else:
+                # No input topic for this grid cell -> black placeholder
+                imgs.append(None)
+                img_msgs.append(None)
+
+        # Determine target tile size
         available_cv = [im for im in imgs if im is not None]
-        # choose target height = min of available heights if any, else 240 as fallback
         if available_cv:
             heights = [im.shape[0] for im in available_cv if im is not None and im.shape[0] > 0]
             target_h = min(heights) if heights else 240
             widths = [im.shape[1] for im in available_cv if im is not None and im.shape[1] > 0]
             median_w = int(sorted(widths)[len(widths)//2]) if widths else 320
         else:
-            # No images available (no publisher or none sent frames) -> produce all-black panorama
             target_h = 240
             median_w = 320
 
-        # Prepare tiles: if img None -> black placeholder; else resize to target_h
+        # Prepare tiles: each tile => exact (target_h, median_w, 3) image
         prepared = []
         for im in imgs:
             if im is None:
                 black = np.zeros((target_h, median_w, 3), dtype=np.uint8)
                 prepared.append(black)
-            else:
+                continue
+            try:
                 h, w = im.shape[0], im.shape[1]
+                # Resize preserving aspect ratio then final-resize to exact median_w x target_h to keep grid aligned
                 if h != target_h:
                     scale = target_h / float(h)
                     new_w = max(1, int(round(w * scale)))
@@ -327,30 +338,53 @@ class YoloFusionNode(Node):
                         im_resized = cv2.resize(im, (new_w, target_h))
                 else:
                     im_resized = im
-                prepared.append(im_resized)
+                # Now force final width = median_w (may warp slightly but ensures tidy grid)
+                if im_resized.shape[1] != median_w:
+                    try:
+                        im_final = cv2.resize(im_resized, (median_w, target_h), interpolation=cv2.INTER_AREA)
+                    except Exception:
+                        im_final = cv2.resize(im_resized, (median_w, target_h))
+                else:
+                    im_final = im_resized
 
-        # Normalize channels & dtype
-        for i, p in enumerate(prepared):
-            if p is None:
-                prepared[i] = np.zeros((target_h, median_w, 3), dtype=np.uint8)
-            else:
-                if len(p.shape) == 2:
-                    prepared[i] = cv2.cvtColor(p, cv2.COLOR_GRAY2BGR)
-                elif p.shape[2] == 4:
-                    prepared[i] = cv2.cvtColor(p, cv2.COLOR_BGRA2BGR)
-                if prepared[i].dtype != np.uint8:
-                    prepared[i] = prepared[i].astype(np.uint8)
+                # Ensure 3 channels and uint8
+                if len(im_final.shape) == 2:
+                    im_final = cv2.cvtColor(im_final, cv2.COLOR_GRAY2BGR)
+                elif im_final.shape[2] == 4:
+                    im_final = cv2.cvtColor(im_final, cv2.COLOR_BGRA2BGR)
+                if im_final.dtype != np.uint8:
+                    im_final = im_final.astype(np.uint8)
 
-        # Concatenate horizontally
-        try:
-            panorama = cv2.hconcat(prepared)
-        except Exception:
-            try:
-                prepared2 = [ (p.astype('uint8') if p.dtype != np.uint8 else p) for p in prepared ]
-                panorama = cv2.hconcat(prepared2)
+                prepared.append(im_final)
             except Exception as e:
-                self.get_logger().error(f'Failed to horizontally concatenate images: {e}')
-                return
+                self.get_logger().warning(f'Failed preparing tile image: {e}')
+                black = np.zeros((target_h, median_w, 3), dtype=np.uint8)
+                prepared.append(black)
+
+        # Build each row by horizontally concatenating the row tiles, then vertically stack rows
+        row_images = []
+        try:
+            for r in range(GRID_ROWS):
+                start = r * GRID_COLS
+                end = start + GRID_COLS
+                row_tiles = prepared[start:end]
+                try:
+                    row_concat = cv2.hconcat(row_tiles)
+                except Exception:
+                    # fallback: ensure dtype uint8 and try again
+                    row_tiles2 = [ (p.astype('uint8') if p.dtype != np.uint8 else p) for p in row_tiles ]
+                    row_concat = cv2.hconcat(row_tiles2)
+                row_images.append(row_concat)
+
+            try:
+                panorama = cv2.vconcat(row_images)
+            except Exception:
+                # fallback: try converting dtypes then vconcat
+                row_images2 = [ (rimg.astype('uint8') if rimg.dtype != np.uint8 else rimg) for rimg in row_images ]
+                panorama = cv2.vconcat(row_images2)
+        except Exception as e:
+            self.get_logger().error(f'Failed to build panorama: {e}')
+            return
 
         # Convert to ROS Image
         try:
@@ -362,30 +396,25 @@ class YoloFusionNode(Node):
                 self.get_logger().error(f'cv_bridge failed to convert panorama to Image: {e}')
                 return
 
-        # Header stamp: prefer newest detection stamp (if any fresh detections were used last cycle),
-        # else use newest available image stamp, else current time.
-        newest_stamp = None
-        # check detection messages used recently (we can use latest_det_msgs but they may be stale; choose current time)
-        # For simplicity, set now as stamp
+        # Header stamp: use current time (safe)
         newest_stamp = self.get_clock().now().to_msg()
-
         ros_img.header.stamp = deepcopy(newest_stamp)
         ros_img.header.frame_id = NEUTRAL_FUSED_FRAME_ID
 
         # Publish stitched image
         try:
             self.img_pub.publish(ros_img)
-            self.get_logger().debug('Published fused dbg image panorama')
+            self.get_logger().debug('Published fused dbg image panorama (2x3)')
         except Exception as e:
             self.get_logger().error(f'Failed to publish fused dbg image: {e}')
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description='YOLO fusion node with image stitching (single file)')
-    parser.add_argument('--det_inputs', nargs=3, metavar=('D1','D2','D3'),
-                        help='Three detection input topics (default cam3,cam5,cam4).',
+    parser = argparse.ArgumentParser(description='YOLO fusion node with image stitching (5 cams, 2x3 grid)')
+    parser.add_argument('--det_inputs', nargs=5, metavar=('D1','D2','D3','D4','D5'),
+                        help='Five detection input topics.',
                         default=DEFAULT_DET_INPUTS)
-    parser.add_argument('--img_inputs', nargs=3, metavar=('I1','I2','I3'),
-                        help='Three debug image input topics (default cam3,cam5,cam4).',
+    parser.add_argument('--img_inputs', nargs=5, metavar=('I3','I1','I2','I5','I4'),
+                        help='Five debug image input topics (order defines tile positions left->right, top->bottom).',
                         default=DEFAULT_IMG_INPUTS)
     parser.add_argument('--output_det', default=DEFAULT_OUTPUT_DET,
                         help='Fused detection output topic (default: /fused/detections)')
@@ -400,8 +429,8 @@ def main(argv=None):
 
     det_inputs = args.det_inputs
     img_inputs = args.img_inputs
-    if len(det_inputs) != 3 or len(img_inputs) != 3:
-        print('ERROR: provide exactly 3 detection topics and 3 image topics', file=sys.stderr)
+    if len(det_inputs) != 5 or len(img_inputs) != 5:
+        print('ERROR: provide exactly 5 detection topics and 5 image topics', file=sys.stderr)
         return 2
 
     rclpy.init()
