@@ -35,14 +35,14 @@ except Exception:
     CvBridgeError = Exception  # fallback
 
 DEFAULT_DET_INPUTS = [
-    '/yolo_cam2/detections',
-    '/yolo_cam3/detections',
-    '/yolo_cam4/detections',
+    '/yolo/detections3',
+    '/yolo/detections5',
+    '/yolo/detections4',
 ]
 DEFAULT_IMG_INPUTS = [
-    '/yolo_cam2/dbg_image',
-    '/yolo_cam3/dbg_image',
-    '/yolo_cam4/dbg_image',
+    '/yolo/dbg_image3',
+    '/yolo/dbg_image5',
+    '/yolo/dbg_image4',
 ]
 DEFAULT_OUTPUT_DET = '/fused/detections'
 DEFAULT_OUTPUT_IMG = '/fused/dbg_image'
@@ -382,10 +382,10 @@ class YoloFusionNode(Node):
 def parse_args(argv):
     parser = argparse.ArgumentParser(description='YOLO fusion node with image stitching (single file)')
     parser.add_argument('--det_inputs', nargs=3, metavar=('D1','D2','D3'),
-                        help='Three detection input topics (default cam2,cam3,cam4).',
+                        help='Three detection input topics (default cam3,cam5,cam4).',
                         default=DEFAULT_DET_INPUTS)
     parser.add_argument('--img_inputs', nargs=3, metavar=('I1','I2','I3'),
-                        help='Three debug image input topics (default cam2,cam3,cam4).',
+                        help='Three debug image input topics (default cam3,cam5,cam4).',
                         default=DEFAULT_IMG_INPUTS)
     parser.add_argument('--output_det', default=DEFAULT_OUTPUT_DET,
                         help='Fused detection output topic (default: /fused/detections)')
