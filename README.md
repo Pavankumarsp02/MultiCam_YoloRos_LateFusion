@@ -17,7 +17,7 @@ This repository contains the code base for the fusion of object detections using
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
 git clone https://github.com/deva-praseeth/YoloRos_LateFusion.git
-# if Ubuntu ver.>=24.04, perform below commands in venv (recommended), or use --break-system-packages 
+# if Ubuntu ver.>=24.04, perform below commands in venv (recommended), or use --break-system-packages
 pip3 install -r yolo_ros/requirements.txt
 cd ~/ros2_ws
 rosdep install --from-paths src --ignore-src -r -y
