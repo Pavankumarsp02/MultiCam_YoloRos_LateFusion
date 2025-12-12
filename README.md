@@ -1,16 +1,15 @@
 # Late fusion of YOLOv8 Detections
 This repository contains the code base for the fusion of object detections using YOLOv8 detections from 5 different Lucid Vision GigE cameras. We run docker container with tmuxinator panes to perform YOLO detections on each camera individually and the fusion node, running in the host, performs late fusion of the detection topics. Moreover, fusion node performs a 2x3 stitch of the 5 camera detection images (possible 6th camera addition).
 
-## ROS2 Wrap for YOLO
-ROS 2 wrap for YOLO models from [Ultralytics](https://github.com/ultralytics/ultralytics) to perform object detection and tracking, instance segmentation, human pose estimation and Oriented Bounding Box (OBB). There are also 3D versions of object detection, including instance segmentation, and human pose estimation based on depth images.
-
 ## Table of Contents
 
 1. [Installation](#installation)
 2. [Docker](#docker)
-3. [Models](#models)
-4. [Usage](#usage)
-5. [Demos](#demos)
+3. [Late Fusion](#late-fusion)
+4. [ROS2 Wrap for YOLO](#ros2-wrap-for-yolo)
+5. [Models](#models)
+6. [Usage](#usage)
+7. [Demos](#demos)
 
 ## Installation
 
@@ -34,23 +33,22 @@ cd ~/ros2_ws/src/yolo_ros
 docker build -t yolo_ros .
 ```
 
-Run the docker container. If you want to use CUDA, you have to install the [NVIDIA Container Tollkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and add `--gpus all`.
+If you want to use CUDA, you have to install the [NVIDIA Container Tollkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and add `--gpus all`.
 
-Each container will be responsible to publish image from 1 camera, hence if there is 5 cameras, 5 containers would need to be created with the following with different names.
+Each container will subscribe to individual cameras and publish detection image, hence if there are 5 cameras, 5 containers should be created with the following with different names.
 
 ```shell
 sudo docker run -it \
   --gpus all \
   --cap-add=ALL \
   --device=/dev/bus/usb:/dev/bus/usb \
-  --device=/dev/nvhost* \
   --network=host \
   -e ROS_DOMAIN_ID=0 \
   -v /home:/host_home \
   -v /etc:/host_etc \
   -v /var:/host_var \
   -w /root \
-  --name <name> \
+  --name <name> \ #<name> = yolo_cam1, yolo_cam2...
   yolo_ros
 
 ```
@@ -67,6 +65,109 @@ source install/setup.sh
 ros2 launch yolo_bringup yolov8.launch.py
 ```
 
+## Late Fusion
+While the yolo_detections are running in 5 containers, the fusion_node.py code can be run on the native host. The node subscribes to all the /yolo/detections and append detection messages from all the camera to send /fused/detections at 10hz. 
+
+Moreover, the node subscribes to all /yolo/dbg_image and stitches the images in 2x3 panorama for rviz visualization. It publishes a black tile in place of cameras with inactive feed.
+Below given is an example of /fused/detections messages.
+```shell
+ros2 topic echo /fused/detections --once
+  header:
+    stamp:
+      sec: 1760620602
+      nanosec: 586551826
+    frame_id: fused
+  detections:
+  - class_id: 9
+    class_name: traffic light
+    score: 0.8731038570404053
+    id: ''
+    bbox:
+      center:
+        position:
+          x: 368.0845642089844
+          y: 131.0710906982422
+        theta: 0.0
+      size:
+        x: 129.17218017578125
+        y: 260.4407653808594
+    bbox3d:
+      center:
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        orientation:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+          w: 1.0
+      size:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+      frame_id: camera_2/camera_link
+    mask:
+      height: 0
+      width: 0
+      data: []
+    keypoints:
+      data: []
+    keypoints3d:
+      data: []
+      frame_id: camera_2/camera_link
+  - class_id: 9
+    class_name: traffic light
+    score: 0.7921506762504578
+    id: ''
+    bbox:
+      center:
+        position:
+          x: 485.69000244140625
+          y: 128.8924560546875
+        theta: 0.0
+      size:
+        x: 110.912109375
+        y: 256.68017578125
+    bbox3d:
+      center:
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        orientation:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+          w: 1.0
+      size:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+      frame_id: camera_2/camera_link
+    mask:
+      height: 0
+      width: 0
+      data: []
+    keypoints:
+      data: []
+    keypoints3d:
+      data: []
+      frame_id: camera_2/camera_link
+  ---
+```
+When no detections are published by any of the cameras, the fusion node displays below empty header.
+```shell
+header:
+  stamp:
+    sec: 1760620602
+    nanosec: 586551826
+  frame_id: fused
+detections:[]
+```
+
+## ROS2 Wrap for YOLO
+ROS 2 wrap for YOLO models from [Ultralytics](https://github.com/ultralytics/ultralytics) to perform object detection and tracking, instance segmentation, human pose estimation and Oriented Bounding Box (OBB). There are also 3D versions of object detection, including instance segmentation, and human pose estimation based on depth images.
 
 ## Models
 
