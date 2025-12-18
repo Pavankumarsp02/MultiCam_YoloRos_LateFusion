@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
-yolo_fusion_node.py (updated: supports 1..6 cameras, 2x3 image stitch)
+6Cam_fusion_node.py (updated: supports 1 to 6 cameras, stitching images in 2x3 matrix)
+Arranged so that the first row displays the stitched feed from the three front cameras in order: left, center and right.
+the second row displays the stitched feed from the three rear cameras in order: left, center and right.
+Arrangement of cameras in my case:
+Front Left:3
+Front Center:1
+Front Right:2
+Rear Left:5
+Rear Center:6
+Rear Right:4
+
+Proper alignment of the camera views without blind spots produces a seamless panoramic view, where the first row shows the front view and the second row shows the rear view.
 
 Behavior summary:
  - Detections (append-only): only accept detections that arrived *since the last publish*.
@@ -458,3 +469,4 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
